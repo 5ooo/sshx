@@ -1,0 +1,579 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SSH_DIR="$HOME/.ssh"
+# sshx 专用密钥，避免和用户已有的默认 SSH 身份混用。
+# 每个本机用户的 HOME 独立，因此各自拥有不同的 sshx 公钥。
+KEY_FILE="$SSH_DIR/id_ed25519_sshx"
+CONFIG_FILE="$SSH_DIR/config"
+
+MARK_BEGIN="# >>> sshx hosts >>>"
+MARK_END="# <<< sshx hosts <<<"
+
+usage() {
+    cat <<EOF
+用法:
+  sshx ip [alias]                  使用当前本机用户名配置免密登录，并连接
+  sshx user@ip [alias]             指定用户名配置免密登录，并连接
+  sshx ip:port [alias]             使用当前本机用户名 + 指定端口
+  sshx user@ip:port [alias]        指定用户名 + 指定端口
+  sshx -p port user@ip [alias]     使用 OpenSSH 风格指定端口
+  sshx alias                       连接已保存的主机
+  sshx help                        查看帮助
+  sshx list                        查看已保存的连接
+  sshx mv old_alias new_alias      重命名连接
+  sshx rm alias                    删除连接
+
+示例:
+  sshx 172.16.10.76
+  sshx 172.16.10.76 dev-server
+  sshx ubuntu@172.16.10.76 dev-server
+  sshx 172.16.10.76:2222 dev-server
+  sshx ubuntu@172.16.10.76:2222 dev-server
+  sshx -p 27380 root@server.example.com
+  sshx list
+  sshx mv ubuntu-172-16-10-76 dev-server
+  sshx rm dev-server
+EOF
+}
+
+ensure_ssh_dir() {
+    mkdir -p "$SSH_DIR"
+    chmod 700 "$SSH_DIR"
+
+    touch "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
+}
+
+ensure_key() {
+    if [ ! -f "$KEY_FILE" ]; then
+        echo "[sshx] 第一次使用，正在准备安全登录…"
+        ssh-keygen -q -t ed25519 -f "$KEY_FILE" -C "sshx-key" -N ""
+    fi
+}
+
+install_public_key() {
+    local user_name="$1"
+    local host_ip="$2"
+    local port="$3"
+
+    if command -v ssh-copy-id >/dev/null 2>&1; then
+        local copy_output
+        if ! copy_output="$(ssh-copy-id -i "${KEY_FILE}.pub" -p "$port" "$user_name@$host_ip" 2>&1)"; then
+            if [[ "$copy_output" != *"All keys were skipped because they already exist"* ]]; then
+                return 1
+            fi
+        fi
+        return 0
+    fi
+
+    # macOS 通常不自带 ssh-copy-id，改用系统自带 ssh 安装公钥。
+    local public_key
+    public_key="$(<"${KEY_FILE}.pub")"
+    ssh -p "$port" "$user_name@$host_ip" \
+        "umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys; grep -qxF \"$public_key\" ~/.ssh/authorized_keys || printf \"%s\\n\" \"$public_key\" >> ~/.ssh/authorized_keys"
+}
+
+ensure_marker_block() {
+    if ! grep -qF "$MARK_BEGIN" "$CONFIG_FILE"; then
+        cat >> "$CONFIG_FILE" <<EOF
+
+$MARK_BEGIN
+$MARK_END
+EOF
+    elif ! grep -qF "$MARK_END" "$CONFIG_FILE"; then
+        # 兼容旧版本 remove 删除最后一个主机时误删结束标记的情况。
+        printf '\n%s\n' "$MARK_END" >> "$CONFIG_FILE"
+    fi
+}
+
+alias_exists() {
+    local alias_name="$1"
+    grep -qE "^Host[[:space:]]+$alias_name$" "$CONFIG_FILE"
+}
+
+managed_alias_exists() {
+    local alias_name="$1"
+
+    awk -v mark_begin="$MARK_BEGIN" -v mark_end="$MARK_END" -v wanted_alias="$alias_name" '
+        $0 == mark_begin { in_sshx_block = 1; next }
+        $0 == mark_end { in_sshx_block = 0; next }
+        in_sshx_block && /^Host[[:space:]]+/ && $2 == wanted_alias { found = 1; exit }
+        END { exit !found }
+    ' "$CONFIG_FILE"
+}
+
+alias_destination() {
+    local alias_name="$1"
+
+    awk -v wanted_alias="$alias_name" '
+        /^Host[[:space:]]+/ {
+            active = ($2 == wanted_alias)
+            next
+        }
+        active && /^[[:space:]]*HostName[[:space:]]+/ { hostname = $2 }
+        active && /^[[:space:]]*User[[:space:]]+/ { user = $2 }
+        active && /^[[:space:]]*Port[[:space:]]+/ { port = $2 }
+        active && /^[[:space:]]*IdentityFile[[:space:]]+/ {
+            printf "%s@%s:%s\n", user, hostname, (port == "" ? "22" : port)
+            exit
+        }
+    ' "$CONFIG_FILE"
+}
+
+find_saved_alias() {
+    local user_name="$1"
+    local host_ip="$2"
+    local port="$3"
+
+    awk -v mark_begin="$MARK_BEGIN" -v mark_end="$MARK_END" \
+        -v wanted_user="$user_name" -v wanted_host="$host_ip" -v wanted_port="$port" '
+        $0 == mark_begin { in_sshx_block = 1; next }
+        $0 == mark_end { in_sshx_block = 0; next }
+        !in_sshx_block { next }
+        /^Host[[:space:]]+/ {
+            alias_name = $2
+            hostname = ""
+            user = ""
+            saved_port = "22"
+            next
+        }
+        /^[[:space:]]*HostName[[:space:]]+/ { hostname = $2 }
+        /^[[:space:]]*User[[:space:]]+/ { user = $2 }
+        /^[[:space:]]*Port[[:space:]]+/ { saved_port = $2 }
+        /^[[:space:]]*IdentityFile[[:space:]]+/ {
+            if (user == wanted_user && hostname == wanted_host && saved_port == wanted_port) {
+                print alias_name
+                exit
+            }
+        }
+    ' "$CONFIG_FILE"
+}
+
+make_default_alias() {
+    local user_name="$1"
+    local host_ip="$2"
+    local port="${3:-22}"
+
+    local safe_host
+    safe_host="$(echo "$host_ip" | tr '.:' '--')"
+
+    if [ "$port" = "22" ]; then
+        echo "${user_name}-${safe_host}"
+    else
+        echo "${user_name}-${safe_host}-${port}"
+    fi
+}
+
+add_or_update_host() {
+    local alias_name="$1"
+    local user_name="$2"
+    local host_ip="$3"
+    local port="${4:-22}"
+    local overwrite="${5:-false}"
+
+    ensure_marker_block
+
+    if alias_exists "$alias_name"; then
+        if [ "$overwrite" = "true" ]; then
+            remove_host "$alias_name"
+        else
+            echo "[sshx] 别名已存在: $alias_name"
+            echo "[sshx] 如需重新配置，请先执行:"
+            echo "       sshx rm $alias_name"
+            return 1
+        fi
+    fi
+
+    local tmp_file
+    tmp_file="$(mktemp)"
+
+    awk -v mark_end="$MARK_END" \
+        -v alias_name="$alias_name" \
+        -v host_ip="$host_ip" \
+        -v user_name="$user_name" \
+        -v port="$port" \
+        -v key_file="$KEY_FILE" '
+        {
+            if ($0 == mark_end) {
+                print ""
+                print "Host " alias_name
+                print "    HostName " host_ip
+                print "    User " user_name
+                print "    Port " port
+                print "    IdentityFile " key_file
+                print "    IdentitiesOnly yes"
+                print "    ServerAliveInterval 30"
+                print "    ServerAliveCountMax 3"
+            }
+            print
+        }
+    ' "$CONFIG_FILE" > "$tmp_file"
+
+    mv "$tmp_file" "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
+
+    echo "[sshx] ✓ 已保存快捷连接：$alias_name"
+}
+
+remove_host() {
+    local alias_name="$1"
+
+    ensure_ssh_dir
+
+    if ! alias_exists "$alias_name"; then
+        echo "[sshx] 未找到别名: $alias_name"
+        exit 1
+    fi
+
+    local tmp_file
+    tmp_file="$(mktemp)"
+
+    awk -v alias_name="$alias_name" -v mark_begin="$MARK_BEGIN" -v mark_end="$MARK_END" '
+        BEGIN {
+            skip = 0
+            in_sshx_block = 0
+        }
+
+        $0 == mark_begin {
+            in_sshx_block = 1
+            print
+            next
+        }
+
+        $0 == mark_end {
+            in_sshx_block = 0
+            skip = 0
+            print
+            next
+        }
+
+        /^Host[[:space:]]+/ {
+            if (in_sshx_block && $2 == alias_name) {
+                skip = 1
+                next
+            } else {
+                skip = 0
+            }
+        }
+
+        skip == 0 {
+            print
+        }
+    ' "$CONFIG_FILE" > "$tmp_file"
+
+    mv "$tmp_file" "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
+
+    echo "[sshx] 已删除别名: $alias_name"
+}
+
+rename_host() {
+    local old_alias="$1"
+    local new_alias="$2"
+
+    ensure_ssh_dir
+
+    if [ "$old_alias" = "$new_alias" ]; then
+        echo "[sshx] 新旧别名相同，无需修改: $old_alias"
+        exit 0
+    fi
+
+    if ! alias_exists "$old_alias"; then
+        echo "[sshx] 未找到旧别名: $old_alias"
+        exit 1
+    fi
+
+    if alias_exists "$new_alias"; then
+        echo "[sshx] 新别名已存在: $new_alias"
+        echo "[sshx] 请换一个别名，或先删除已有别名:"
+        echo "       sshx rm $new_alias"
+        exit 1
+    fi
+
+    local tmp_file
+    tmp_file="$(mktemp)"
+
+    awk -v old_alias="$old_alias" -v new_alias="$new_alias" '
+        /^Host[[:space:]]+/ {
+            if ($2 == old_alias) {
+                print "Host " new_alias
+                next
+            }
+        }
+
+        {
+            print
+        }
+    ' "$CONFIG_FILE" > "$tmp_file"
+
+    mv "$tmp_file" "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
+
+    echo "[sshx] 已重命名:"
+    echo "       $old_alias -> $new_alias"
+    echo
+    echo "[sshx] 以后可以使用:"
+    echo "       sshx $new_alias"
+    echo "       ssh $new_alias"
+}
+
+list_hosts() {
+    ensure_ssh_dir
+
+    echo "sshx hosts:"
+
+    awk '
+        /^Host[[:space:]]+/ {
+            host=$2
+            hostname=""
+            user=""
+            port="22"
+        }
+
+        /^[[:space:]]*HostName[[:space:]]+/ {
+            hostname=$2
+        }
+
+        /^[[:space:]]*User[[:space:]]+/ {
+            user=$2
+        }
+
+        /^[[:space:]]*Port[[:space:]]+/ {
+            port=$2
+        }
+
+        /^[[:space:]]*IdentityFile[[:space:]]+/ {
+            if (host != "" && hostname != "" && user != "") {
+                printf "  %-24s %s@%s:%s\n", host, user, hostname, port
+            }
+
+            host=""
+            hostname=""
+            user=""
+            port="22"
+        }
+    ' "$CONFIG_FILE"
+}
+
+connect_alias() {
+    local alias_name="$1"
+
+    echo "[sshx] 🚀 正在为你打开连接…"
+    exec ssh "$alias_name"
+}
+
+looks_like_host() {
+    local value="$1"
+
+    # IPv4，例如 172.16.10.76 或 172.16.10.76:2222
+    if [[ "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(:[0-9]+)?$ ]]; then
+        return 0
+    fi
+
+    # 域名或 .local，例如 robot.local、server.company.com
+    if [[ "$value" == *.* ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
+parse_target() {
+    local target="$1"
+
+    PARSED_USER=""
+    PARSED_HOST=""
+    PARSED_PORT="22"
+
+    local host_part=""
+
+    if [[ "$target" == *@* ]]; then
+        PARSED_USER="${target%@*}"
+        host_part="${target#*@}"
+    else
+        PARSED_USER="$(whoami)"
+        host_part="$target"
+    fi
+
+    if [[ "$host_part" == *:* ]]; then
+        PARSED_PORT="${host_part##*:}"
+        PARSED_HOST="${host_part%%:*}"
+    else
+        PARSED_HOST="$host_part"
+    fi
+
+    if [ -z "$PARSED_USER" ]; then
+        echo "[sshx] 用户名不能为空"
+        exit 1
+    fi
+
+    if [ -z "$PARSED_HOST" ]; then
+        echo "[sshx] 主机地址不能为空"
+        exit 1
+    fi
+
+    if ! [[ "$PARSED_PORT" =~ ^[0-9]+$ ]]; then
+        echo "[sshx] 端口格式错误: $PARSED_PORT"
+        exit 1
+    fi
+}
+
+setup_and_connect() {
+    local target="$1"
+    local alias_name="${2:-}"
+    local requested_port="${3:-}"
+
+    parse_target "$target"
+
+    local user_name="$PARSED_USER"
+    local host_ip="$PARSED_HOST"
+    local port="${requested_port:-$PARSED_PORT}"
+    local alias_was_provided="true"
+
+    if ! [[ "$port" =~ ^[0-9]+$ ]]; then
+        echo "[sshx] 端口格式错误: $port"
+        exit 1
+    fi
+
+    if [ -z "$alias_name" ]; then
+        alias_was_provided="false"
+        alias_name="$(make_default_alias "$user_name" "$host_ip" "$port")"
+    fi
+
+    ensure_ssh_dir
+
+    local existing_alias
+    existing_alias="$(find_saved_alias "$user_name" "$host_ip" "$port")"
+    if [ -n "$existing_alias" ]; then
+        if [ "$existing_alias" = "$alias_name" ]; then
+            echo "[sshx] 已找到这个设备，马上为你连接…"
+            connect_alias "$existing_alias"
+            return
+        elif [ "$alias_was_provided" = "false" ]; then
+            echo "[sshx] 这个设备已经保存为“$existing_alias”，将直接连接。"
+            connect_alias "$existing_alias"
+            return
+        else
+            echo "[sshx] 这个设备已保存为“$existing_alias”，将改用你指定的别名“$alias_name”。"
+        fi
+    fi
+
+    local overwrite_alias="false"
+    if alias_exists "$alias_name"; then
+        if ! managed_alias_exists "$alias_name"; then
+            echo "[sshx] 别名“$alias_name”已被 ~/.ssh/config 中的非 sshx 配置占用。"
+            echo "[sshx] 为避免覆盖该配置，本次连接未保存。请换一个别名。"
+            exit 1
+        fi
+
+        local old_destination
+        old_destination="$(alias_destination "$alias_name")"
+        echo "[sshx] 别名“$alias_name”已存在，当前指向：${old_destination:-未知地址}"
+
+        local answer
+        if ! read -r -p "[sshx] 是否覆盖为 $user_name@$host_ip:$port？[y/N] " answer; then
+            echo "[sshx] 未确认覆盖，已取消。"
+            exit 1
+        fi
+        case "$answer" in
+            y|Y|yes|YES)
+                overwrite_alias="true"
+                ;;
+            *)
+                echo "[sshx] 未覆盖，已取消。"
+                exit 1
+                ;;
+        esac
+    fi
+
+    if [ -z "$existing_alias" ]; then
+        ensure_key
+
+        echo "[sshx] 正在准备连接：$user_name@$host_ip"
+        echo "[sshx] 首次连接时，可能需要输入目标设备的密码。"
+
+        if ! install_public_key "$user_name" "$host_ip" "$port"; then
+            echo "[sshx] 连接准备未完成，请确认地址、账号、密码和网络后重试。" >&2
+            exit 1
+        fi
+        : # 不显示工具的技术输出
+    fi
+
+    add_or_update_host "$alias_name" "$user_name" "$host_ip" "$port" "$overwrite_alias"
+
+    if [ -n "$existing_alias" ] && [ "$existing_alias" != "$alias_name" ]; then
+        remove_host "$existing_alias"
+    fi
+
+    echo
+    echo "[sshx] ✨ 一切准备好了！"
+    echo "[sshx] 下次输入 sshx $alias_name 就能直接连接。"
+    echo
+    echo
+
+    connect_alias "$alias_name"
+}
+
+main() {
+    if [ $# -lt 1 ]; then
+        usage
+        exit 1
+    fi
+
+    if [ "$1" = "-p" ]; then
+        if [ $# -lt 3 ] || [ $# -gt 4 ]; then
+            echo "[sshx] -p 后需要指定端口和目标地址"
+            echo "示例: sshx -p 27380 root@server.example.com [alias]"
+            exit 1
+        fi
+        if ! [[ "$2" =~ ^[0-9]+$ ]]; then
+            echo "[sshx] 端口格式错误: $2"
+            exit 1
+        fi
+        setup_and_connect "$3" "${4:-}" "$2"
+        return
+    fi
+
+    case "$1" in
+        help)
+            usage
+            ;;
+
+        list)
+            list_hosts
+            ;;
+
+        mv)
+            if [ $# -lt 3 ]; then
+                echo "[sshx] 请指定旧别名和新别名"
+                echo "示例: sshx mv old_alias new_alias"
+                exit 1
+            fi
+            rename_host "$2" "$3"
+            ;;
+
+        rm)
+            if [ $# -lt 2 ]; then
+                echo "[sshx] 请指定要删除的别名"
+                echo "示例: sshx rm dev-server"
+                exit 1
+            fi
+            remove_host "$2"
+            ;;
+
+        *@*)
+            setup_and_connect "$@"
+            ;;
+
+        *)
+            if looks_like_host "$1"; then
+                setup_and_connect "$@"
+            else
+                connect_alias "$1"
+            fi
+            ;;
+    esac
+}
+
+main "$@"
