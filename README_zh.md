@@ -13,6 +13,7 @@
 - 支持自定义用户名、主机、端口和别名。
 - 支持查看、重命名和删除已保存连接。
 - 卸载时可选择保留或删除保存的数据。
+- 0 额外依赖，极速安装，开箱即用。
 
 ## 支持平台
 
@@ -30,7 +31,7 @@
 ```bash
 git clone <仓库地址>
 cd sshx
-./scripts/install-sshx.sh
+./scripts/install.sh
 ```
 
 重新打开终端，或执行安装脚本输出的 `source` 命令。
@@ -86,7 +87,7 @@ sshx help
 ## 卸载
 
 ```bash
-./scripts/uninstall-sshx.sh
+./scripts/uninstall.sh
 ```
 
 卸载会移除 sshx 和 shell 初始化配置，然后询问是否删除 sshx 保存的连接和专用密钥。其他 SSH 配置和密钥不会受影响。

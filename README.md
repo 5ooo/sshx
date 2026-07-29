@@ -13,6 +13,7 @@ A lightweight SSH helper for passwordless access and memorable host aliases. Set
 - Support for custom usernames, hosts, ports, and aliases.
 - List, rename, and remove saved connections.
 - Choose whether to keep or remove saved data during uninstall.
+- Zero extra dependencies, fast to install, and ready to use.
 
 ## Supported Platforms
 
@@ -30,7 +31,7 @@ Required OpenSSH commands: `ssh`, `scp`, and `ssh-keygen`. On systems without `s
 ```bash
 git clone <repository-url>
 cd sshx
-./scripts/install-sshx.sh
+./scripts/install.sh
 ```
 
 Restart the terminal, or run the `source` command printed by the installer.
@@ -86,7 +87,7 @@ sshx help
 ## Uninstall
 
 ```bash
-./scripts/uninstall-sshx.sh
+./scripts/uninstall.sh
 ```
 
 The script removes sshx and its shell setup, then asks whether to remove sshx aliases and its dedicated key pair. Other SSH configuration and keys are not affected.

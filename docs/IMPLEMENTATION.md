@@ -5,7 +5,7 @@
 ## 组件
 
 - `sshx`：主 Bash 脚本，负责解析参数、生成密钥、安装公钥和维护 SSH 配置。
-- `scripts/install-sshx.sh`：将脚本安装到 `~/.local/bin/sshx`，并按当前 shell 启用 Bash 或 zsh 补全。
+- `scripts/install.sh`：将脚本安装到 `~/.local/bin/sshx`，并按当前 shell 启用 Bash 或 zsh 补全。
 - `src/sshx-completion.bash`：供 Bash 使用的补全脚本。
 - `src/sshx-completion.zsh`：供 macOS 默认 zsh 使用的补全脚本。
 

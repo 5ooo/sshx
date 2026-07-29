@@ -10,8 +10,15 @@ CONFIG_FILE="$SSH_DIR/config"
 MARK_BEGIN="# >>> sshx hosts >>>"
 MARK_END="# <<< sshx hosts <<<"
 
+# 保存安装公钥时的 OpenSSH 输出，供调用方识别主机指纹冲突。
+INSTALL_PUBLIC_KEY_OUTPUT=""
+
 usage() {
-    cat <<EOF
+    local message_locale="${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}"
+
+    case "$message_locale" in
+        zh*|ZH*|Zh*|zH*)
+            cat <<EOF
 用法:
   sshx ip [alias]                  使用当前本机用户名配置免密登录，并连接
   sshx user@ip [alias]             指定用户名配置免密登录，并连接
@@ -35,6 +42,34 @@ usage() {
   sshx mv ubuntu-172-16-10-76 dev-server
   sshx rm dev-server
 EOF
+            ;;
+        *)
+            cat <<EOF
+Usage:
+  sshx ip [alias]                  Set up passwordless login with the current local username, then connect
+  sshx user@ip [alias]             Set up and connect with a specified username
+  sshx ip:port [alias]             Use the current local username and a specified port
+  sshx user@ip:port [alias]        Use a specified username and port
+  sshx -p port user@ip [alias]     Specify the port in OpenSSH style
+  sshx alias                       Connect to a saved host
+  sshx help                        Show this help
+  sshx list                        List saved connections
+  sshx mv old_alias new_alias      Rename a connection
+  sshx rm alias                    Remove a connection
+
+Examples:
+  sshx 172.16.10.76
+  sshx 172.16.10.76 dev-server
+  sshx ubuntu@172.16.10.76 dev-server
+  sshx 172.16.10.76:2222 dev-server
+  sshx ubuntu@172.16.10.76:2222 dev-server
+  sshx -p 27380 root@server.example.com
+  sshx list
+  sshx mv ubuntu-172-16-10-76 dev-server
+  sshx rm dev-server
+EOF
+            ;;
+    esac
 }
 
 ensure_ssh_dir() {
@@ -57,10 +92,13 @@ install_public_key() {
     local host_ip="$2"
     local port="$3"
 
+    INSTALL_PUBLIC_KEY_OUTPUT=""
+
     if command -v ssh-copy-id >/dev/null 2>&1; then
         local copy_output
         if ! copy_output="$(ssh-copy-id -i "${KEY_FILE}.pub" -p "$port" "$user_name@$host_ip" 2>&1)"; then
             if [[ "$copy_output" != *"All keys were skipped because they already exist"* ]]; then
+                INSTALL_PUBLIC_KEY_OUTPUT="$copy_output"
                 return 1
             fi
         fi
@@ -69,9 +107,50 @@ install_public_key() {
 
     # macOS 通常不自带 ssh-copy-id，改用系统自带 ssh 安装公钥。
     local public_key
+    local ssh_output
     public_key="$(<"${KEY_FILE}.pub")"
-    ssh -p "$port" "$user_name@$host_ip" \
-        "umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys; grep -qxF \"$public_key\" ~/.ssh/authorized_keys || printf \"%s\\n\" \"$public_key\" >> ~/.ssh/authorized_keys"
+    if ! ssh_output="$(ssh -p "$port" "$user_name@$host_ip" \
+        "umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys; grep -qxF \"$public_key\" ~/.ssh/authorized_keys || printf \"%s\\n\" \"$public_key\" >> ~/.ssh/authorized_keys" 2>&1)"; then
+        INSTALL_PUBLIC_KEY_OUTPUT="$ssh_output"
+        return 1
+    fi
+}
+
+is_host_key_mismatch() {
+    [[ "$INSTALL_PUBLIC_KEY_OUTPUT" == *"REMOTE HOST IDENTIFICATION HAS CHANGED"* ]] ||
+        [[ "$INSTALL_PUBLIC_KEY_OUTPUT" == *"Host key for "*" has changed"* ]]
+}
+
+confirm_remove_stale_host_key() {
+    local host_ip="$1"
+    local port="$2"
+    local known_hosts_target="$host_ip"
+    local answer
+
+    if [ "$port" != "22" ]; then
+        known_hosts_target="[$host_ip]:$port"
+    fi
+
+    echo "[sshx] 检测到 $host_ip:$port 的主机指纹与本机记录不一致。"
+    echo "[sshx] 如果该 IP 已分配给另一台机器，可以删除旧指纹后继续。"
+    if ! read -r -p "[sshx] 是否删除旧指纹并继续连接？[y/N] " answer; then
+        echo "[sshx] 未确认删除，已取消。"
+        return 1
+    fi
+
+    case "$answer" in
+        y|Y|yes|YES)
+            if ! ssh-keygen -R "$known_hosts_target"; then
+                echo "[sshx] 删除旧指纹失败，请检查 ~/.ssh/known_hosts 后重试。" >&2
+                return 1
+            fi
+            echo "[sshx] 已删除旧指纹，正在重新连接…"
+            ;;
+        *)
+            echo "[sshx] 已保留旧指纹，本次连接已取消。"
+            return 1
+            ;;
+    esac
 }
 
 ensure_marker_block() {
@@ -358,8 +437,62 @@ list_hosts() {
 
 connect_alias() {
     local alias_name="$1"
+    local connection_output_file
+    local connection_output_pipe
+    local connection_status
+    local output_copier_pid
+    local resolved_config
+    local host_ip
+    local port
 
     echo "[sshx] 🚀 正在为你打开连接…"
+    connection_output_file="$(mktemp)"
+    connection_output_pipe="${connection_output_file}.pipe"
+    if ! mkfifo "$connection_output_pipe"; then
+        rm -f "$connection_output_file"
+        echo "[sshx] 无法创建连接日志管道。" >&2
+        return 1
+    fi
+
+    # 同时保留 SSH 的终端交互和错误输出，以便在已保存别名的主机指纹
+    # 发生变化时，也能给出与首次配置相同的安全确认。
+    tee "$connection_output_file" <"$connection_output_pipe" >&2 &
+    output_copier_pid=$!
+    if ssh "$alias_name" 2>"$connection_output_pipe"; then
+        connection_status=0
+    else
+        connection_status=$?
+    fi
+    wait "$output_copier_pid" || true
+    rm -f "$connection_output_pipe"
+
+    INSTALL_PUBLIC_KEY_OUTPUT="$(<"$connection_output_file")"
+    rm -f "$connection_output_file"
+
+    if [ "$connection_status" -eq 0 ]; then
+        return 0
+    fi
+
+    if ! is_host_key_mismatch; then
+        return "$connection_status"
+    fi
+
+    if ! resolved_config="$(ssh -G "$alias_name" 2>/dev/null)"; then
+        echo "[sshx] 无法解析别名“$alias_name”的目标地址，请检查 ~/.ssh/config。" >&2
+        return "$connection_status"
+    fi
+    host_ip="$(awk '$1 == "hostname" { print $2; exit }' <<<"$resolved_config")"
+    port="$(awk '$1 == "port" { print $2; exit }' <<<"$resolved_config")"
+
+    if [ -z "$host_ip" ] || [ -z "$port" ]; then
+        echo "[sshx] 无法解析别名“$alias_name”的目标地址，请检查 ~/.ssh/config。" >&2
+        return "$connection_status"
+    fi
+
+    if ! confirm_remove_stale_host_key "$host_ip" "$port"; then
+        return 1
+    fi
+
     exec ssh "$alias_name"
 }
 
@@ -494,8 +627,18 @@ setup_and_connect() {
         echo "[sshx] 首次连接时，可能需要输入目标设备的密码。"
 
         if ! install_public_key "$user_name" "$host_ip" "$port"; then
-            echo "[sshx] 连接准备未完成，请确认地址、账号、密码和网络后重试。" >&2
-            exit 1
+            if is_host_key_mismatch; then
+                if ! confirm_remove_stale_host_key "$host_ip" "$port"; then
+                    exit 1
+                fi
+                if ! install_public_key "$user_name" "$host_ip" "$port"; then
+                    echo "[sshx] 删除旧指纹后仍无法连接，请确认目标机器身份、账号、密码和网络后重试。" >&2
+                    exit 1
+                fi
+            else
+                echo "[sshx] 连接准备未完成，请确认地址、账号、密码和网络后重试。" >&2
+                exit 1
+            fi
         fi
         : # 不显示工具的技术输出
     fi
