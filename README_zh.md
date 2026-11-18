@@ -22,19 +22,41 @@
 | Linux | Bash | 支持 |
 | macOS | zsh、Bash | 支持 |
 | WSL（Linux 环境） | Bash | 支持 |
-| 原生 Windows（PowerShell/cmd） | — | 暂不支持 |
+| 原生 Windows | PowerShell、cmd | 支持 |
 
-系统需要提供 `ssh`、`scp` 和 `ssh-keygen`。如果没有 `ssh-copy-id`（macOS 常见），sshx 会自动使用 `ssh` 安装公钥。
+系统需要提供 `ssh`、`scp` 和 `ssh-keygen`。Windows 需要 Windows PowerShell 5.1 和 Windows OpenSSH 客户端；如果缺少 OpenSSH 客户端，可在 Windows 的“可选功能”中安装。首次配置目标机器时，远程默认 shell 需要支持 POSIX 命令（例如 Linux 或 macOS 的 shell）。
+
+## 目录结构
+
+| 目录 | 适用平台和内容 |
+| --- | --- |
+| `linux-macos/` | Linux、macOS 和 WSL 共用的主程序、安装卸载脚本及补全。 |
+| `windows/` | Windows 主程序、安装卸载脚本、补全及回归测试。 |
+| `docs/` | 共用的实现说明。 |
+
+两个平台目录都包含各自运行和安装所需的文件，可以单独复制到对应系统使用。
 
 ## 安装
+
+### Linux / macOS / WSL
 
 ```bash
 git clone <仓库地址>
 cd sshx
-./scripts/install.sh
+./linux-macos/scripts/install.sh
 ```
 
 重新打开终端，或执行安装脚本输出的 `source` 命令。
+
+### Windows
+
+在 PowerShell 或 cmd 中进入项目目录，执行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\windows\scripts\install-sshx.ps1
+```
+
+重新打开终端后即可使用 `sshx`。安装脚本会为当前用户添加命令路径，并为 Windows PowerShell 5.1 的配置文件添加补全；如果系统执行策略不允许加载配置文件，命令仍可使用，但补全需要启用配置文件。`sshx.cmd` 在启动其 PowerShell 脚本时仅对该进程使用 `Bypass`，不会修改全局执行策略。Windows 不需要 WSL 或 Git Bash。如果使用 PowerShell 7 并希望启用补全，可将上述命令中的 `powershell.exe` 换成 `pwsh.exe` 再执行一次，以更新 PowerShell 7 自己的配置文件。
 
 ## 快速开始
 
@@ -86,11 +108,19 @@ sshx help
 
 ## 卸载
 
+Linux、macOS 或 WSL：
+
 ```bash
-./scripts/uninstall.sh
+./linux-macos/scripts/uninstall.sh
 ```
 
-卸载会移除 sshx 和 shell 初始化配置，然后询问是否删除 sshx 保存的连接和专用密钥。其他 SSH 配置和密钥不会受影响。
+Windows（在项目目录下）：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\windows\scripts\uninstall-sshx.ps1
+```
+
+卸载会移除 sshx 和对应的 shell 配置，然后询问是否删除 sshx 保存的连接和专用密钥。其他 SSH 配置和密钥不会受影响。Windows 中可使用 `-Yes` 跳过卸载确认并保留数据；如需同时删除数据，可明确指定 `-Yes -RemoveData`。
 
 ## 开发说明
 

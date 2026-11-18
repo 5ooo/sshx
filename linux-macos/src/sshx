@@ -432,7 +432,7 @@ list_hosts() {
             user=""
             port="22"
         }
-    ' "$CONFIG_FILE"
+    ' "$CONFIG_FILE" | sort
 }
 
 connect_alias() {

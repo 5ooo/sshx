@@ -4,10 +4,14 @@
 
 ## 组件
 
-- `sshx`：主 Bash 脚本，负责解析参数、生成密钥、安装公钥和维护 SSH 配置。
-- `scripts/install.sh`：将脚本安装到 `~/.local/bin/sshx`，并按当前 shell 启用 Bash 或 zsh 补全。
-- `src/sshx-completion.bash`：供 Bash 使用的补全脚本。
-- `src/sshx-completion.zsh`：供 macOS 默认 zsh 使用的补全脚本。
+- `linux-macos/src/sshx`：主 Bash 脚本，负责解析参数、生成密钥、安装公钥和维护 SSH 配置。
+- `linux-macos/scripts/install.sh`：将脚本安装到 `~/.local/bin/sshx`，并按当前 shell 启用 Bash 或 zsh 补全。
+- `linux-macos/src/sshx-completion.bash`：供 Bash 使用的补全脚本。
+- `linux-macos/src/sshx-completion.zsh`：供 macOS 默认 zsh 使用的补全脚本。
+- `windows/src/sshx.ps1`：原生 Windows PowerShell 实现；`windows/src/sshx.cmd` 是 PowerShell 和 cmd 共用的入口。
+- `windows/scripts/install-sshx.ps1`、`windows/scripts/uninstall-sshx.ps1`：Windows 安装和卸载脚本。
+- `windows/src/sshx-completion.ps1`：PowerShell 补全。
+- `windows/scripts/sshx-marked-block.ps1`：在保留标记之外字节和原编码的前提下更新配置区块。
 
 ## 密钥
 
@@ -18,7 +22,7 @@ sshx 使用专用 ED25519 密钥：
 ~/.ssh/id_ed25519_sshx.pub
 ```
 
-首次使用时脚本调用 `ssh-keygen` 创建密钥；首次添加目标服务器时优先调用 `ssh-copy-id` 写入远程 `authorized_keys`，未安装该命令（例如 macOS）时使用 `ssh` 回退。
+首次使用时脚本调用 `ssh-keygen` 创建密钥。Bash 版本优先调用 `ssh-copy-id`，未安装时使用 `ssh` 回退；Windows 版本通过 `ssh` 写入远程 `authorized_keys`。Windows 首次配置要求远程默认 shell 支持 POSIX 命令。
 
 ## SSH 配置
 
@@ -64,8 +68,14 @@ Host dev-server
 
 并在 `~/.bashrc` 的 sshx 标记区块中增加 PATH 与补全脚本加载逻辑。重复安装不会重复追加。
 
+Windows 安装器将 `sshx.cmd`、`sshx-main.ps1` 和补全脚本复制到用户目录下的 `.local\bin`，加入用户 PATH，并在当前 PowerShell 配置文件的标记区块中启用补全。命令入口启动 Windows PowerShell 5.1 并对该进程临时使用执行策略 `Bypass`。Windows 首次创建 sshx 区块时将其放在 SSH 配置开头，使主机专属设置先于通配配置生效；写入使用无 BOM 的 UTF-8。配置损坏、标记不配对或公钥安装失败时不会删除现有条目。
+
 ## 维护约束
 
 - `~/.ssh` 权限保持 `700`，配置文件保持 `600`。
 - 不要输出或记录私钥内容。
 - 变更配置解析逻辑时，避免修改 sshx 标记区块之外的内容。
+
+## Windows 回归检查
+
+在安装了 PowerShell 7.3+ 和 Python 3 的 Linux 或 macOS 开发环境中，可运行 `PWSH=/path/to/pwsh python3 windows/tests/test_windows_port.py`。测试使用隔离目录和模拟 SSH 传输，验证真实密钥生成、远程安装命令、配置解析、别名管理、安装和卸载；它不能代替 Windows 系统上的端到端检查。

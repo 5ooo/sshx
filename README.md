@@ -22,19 +22,41 @@ A lightweight SSH helper for passwordless access and memorable host aliases. Set
 | Linux | Bash | Supported |
 | macOS | zsh, Bash | Supported |
 | WSL (Linux) | Bash | Supported |
-| Native Windows (PowerShell/cmd) | — | Not supported |
+| Native Windows | PowerShell, cmd | Supported |
 
-Required OpenSSH commands: `ssh`, `scp`, and `ssh-keygen`. On systems without `ssh-copy-id` (commonly macOS), sshx falls back to `ssh` to install the public key.
+Required OpenSSH commands: `ssh`, `scp`, and `ssh-keygen`. Windows also requires Windows PowerShell 5.1 and the Windows OpenSSH Client optional feature. Initial setup expects a POSIX-compatible remote shell, such as the default shell on Linux or macOS.
+
+## Project Layout
+
+| Directory | Platform and contents |
+| --- | --- |
+| `linux-macos/` | Shared program, installers, and completion for Linux, macOS, and WSL. |
+| `windows/` | Windows program, installers, completion, and regression tests. |
+| `docs/` | Shared implementation notes. |
+
+Each platform directory contains the files needed to install and run it and can be copied to the corresponding system on its own.
 
 ## Install
+
+### Linux / macOS / WSL
 
 ```bash
 git clone <repository-url>
 cd sshx
-./scripts/install.sh
+./linux-macos/scripts/install.sh
 ```
 
 Restart the terminal, or run the `source` command printed by the installer.
+
+### Windows
+
+From the project directory in PowerShell or cmd, run:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\windows\scripts\install-sshx.ps1
+```
+
+Open a new terminal to use `sshx`. The installer adds the command to the user PATH and enables completion in the Windows PowerShell 5.1 profile. If the execution policy prevents profiles from loading, the command still works, but completion requires the profile to be enabled. The `sshx.cmd` launcher uses `Bypass` only for its PowerShell process; it does not change the global execution policy. WSL and Git Bash are not required. For completion in PowerShell 7, rerun the command with `pwsh.exe` instead of `powershell.exe` to update its separate profile.
 
 ## Quick Start
 
@@ -86,11 +108,19 @@ sshx help
 
 ## Uninstall
 
+Linux, macOS, or WSL:
+
 ```bash
-./scripts/uninstall.sh
+./linux-macos/scripts/uninstall.sh
 ```
 
-The script removes sshx and its shell setup, then asks whether to remove sshx aliases and its dedicated key pair. Other SSH configuration and keys are not affected.
+Windows (from the project directory):
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\windows\scripts\uninstall-sshx.ps1
+```
+
+The script removes sshx and its shell setup, then asks whether to remove sshx aliases and its dedicated key pair. Other SSH configuration and keys are not affected. On Windows, `-Yes` skips the uninstall confirmation and keeps saved data; pass `-Yes -RemoveData` explicitly to remove that data too.
 
 ## Development
 
